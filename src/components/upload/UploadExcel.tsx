@@ -1,19 +1,31 @@
 import React, { useState, useRef } from 'react'
-import { Upload, FileSpreadsheet, CheckCircle, XCircle, AlertCircle, Download, Loader2 } from 'lucide-react'
-import { parseExcelFile, validateExcelRows } from '../../utils/excelParser'
+import { Upload, FileSpreadsheet, CheckCircle, XCircle, AlertCircle, Download, Loader2, Settings2 } from 'lucide-react'
+import {
+  readFile,
+  autoDetectMapping,
+  buildRows,
+  validateExcelRows,
+  ColumnMapping,
+  FIELD_LABELS,
+  REQUIRED_FIELDS,
+} from '../../utils/excelParser'
 import { importExcelData } from '../../utils/excelImporter'
 import { supabase } from '../../lib/supabase'
 import { useAuth } from '../../hooks/useAuth'
 import { ExcelRow } from '../../types'
 
-type UploadState = 'idle' | 'parsing' | 'preview' | 'importing' | 'done' | 'error'
+type UploadState = 'idle' | 'parsing' | 'mapping' | 'preview' | 'importing' | 'done' | 'error'
+
+const FIELD_ORDER: (keyof ColumnMapping)[] = ['date', 'product_name', 'brand', 'category', 'stock_added', 'quantity_sold']
 
 export default function UploadExcel() {
   const { user } = useAuth()
   const fileRef = useRef<HTMLInputElement>(null)
   const [state, setState] = useState<UploadState>('idle')
   const [fileName, setFileName] = useState('')
-  const [parsedRows, setParsedRows] = useState<ExcelRow[]>([])
+  const [headers, setHeaders] = useState<string[]>([])
+  const [rawRows, setRawRows] = useState<any[][]>([])
+  const [mapping, setMapping] = useState<ColumnMapping | null>(null)
   const [validRows, setValidRows] = useState<ExcelRow[]>([])
   const [invalidMessages, setInvalidMessages] = useState<string[]>([])
   const [result, setResult] = useState<{ processed: number; failed: number; errors: string[] } | null>(null)
@@ -31,12 +43,12 @@ export default function UploadExcel() {
     setError('')
 
     try {
-      const rows = await parseExcelFile(file)
-      const { valid, invalid } = validateExcelRows(rows)
-      setParsedRows(rows)
-      setValidRows(valid)
-      setInvalidMessages(invalid)
-      setState('preview')
+      const { headers: fileHeaders, rawRows: fileRows } = await readFile(file)
+      const guessedMapping = autoDetectMapping(fileHeaders)
+      setHeaders(fileHeaders)
+      setRawRows(fileRows)
+      setMapping(guessedMapping)
+      setState('mapping')
     } catch (err: any) {
       setError(err.message)
       setState('error')
@@ -50,12 +62,27 @@ export default function UploadExcel() {
     if (file) handleFile(file)
   }
 
+  function updateMapping(field: keyof ColumnMapping, columnIndex: number) {
+    if (!mapping) return
+    setMapping({ ...mapping, [field]: columnIndex })
+  }
+
+  function confirmMapping() {
+    if (!mapping) return
+    const rows = buildRows(rawRows, mapping)
+    const { valid, invalid } = validateExcelRows(rows)
+    setValidRows(valid)
+    setInvalidMessages(invalid)
+    setState('preview')
+  }
+
+  const mappingIsComplete = mapping ? REQUIRED_FIELDS.every(f => mapping[f] >= 0) : false
+
   async function handleImport() {
     if (!user || validRows.length === 0) return
     setState('importing')
 
     try {
-      // Create upload record
       const { data: uploadRecord, error } = await supabase
         .from('excel_uploads')
         .insert({
@@ -82,7 +109,9 @@ export default function UploadExcel() {
   function reset() {
     setState('idle')
     setFileName('')
-    setParsedRows([])
+    setHeaders([])
+    setRawRows([])
+    setMapping(null)
     setValidRows([])
     setInvalidMessages([])
     setResult(null)
@@ -109,7 +138,7 @@ export default function UploadExcel() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h2 className="font-display text-xl font-bold text-white">Upload Excel</h2>
-          <p className="text-slate-500 text-sm">Import inventory and sales data from spreadsheet</p>
+          <p className="text-slate-500 text-sm">Import inventory and sales data from any spreadsheet format</p>
         </div>
         <button onClick={downloadTemplate} className="btn-secondary">
           <Download className="w-4 h-4" />
@@ -118,15 +147,20 @@ export default function UploadExcel() {
       </div>
 
       {/* Expected format */}
-      <div className="card p-4">
-        <p className="text-slate-400 text-sm font-medium mb-2">Expected Columns</p>
-        <div className="flex flex-wrap gap-2">
-          {['Date', 'Product Name', 'Brand', 'Category', 'Stock Added', 'Quantity Sold'].map(col => (
-            <span key={col} className="px-2.5 py-1 bg-slate-800 rounded-md text-slate-300 text-xs font-mono border border-slate-700">{col}</span>
-          ))}
+      {(state === 'idle' || state === 'error') && (
+        <div className="card p-4">
+          <p className="text-slate-400 text-sm font-medium mb-2">Fields We Import</p>
+          <div className="flex flex-wrap gap-2">
+            {['Date', 'Product Name', 'Brand', 'Category', 'Stock Added', 'Quantity Sold'].map(col => (
+              <span key={col} className="px-2.5 py-1 bg-slate-800 rounded-md text-slate-300 text-xs font-mono border border-slate-700">{col}</span>
+            ))}
+          </div>
+          <p className="text-slate-600 text-xs mt-2">
+            Your file's column names and order don't need to match exactly — after upload, you'll be able to map
+            your own columns to these fields.
+          </p>
         </div>
-        <p className="text-slate-600 text-xs mt-2">Date format: DD/MM/YYYY or MM/DD/YYYY. Headers are case-insensitive.</p>
-      </div>
+      )}
 
       {/* Upload area */}
       {(state === 'idle' || state === 'error') && (
@@ -141,7 +175,7 @@ export default function UploadExcel() {
         >
           <FileSpreadsheet className="w-10 h-10 text-slate-600 mx-auto mb-3" />
           <p className="text-slate-300 font-medium mb-1">Drop your file here or click to browse</p>
-          <p className="text-slate-500 text-sm">Supports .xlsx, .xls, .csv</p>
+          <p className="text-slate-500 text-sm">Supports .xlsx, .xls, .csv — any column layout</p>
           <input
             ref={fileRef}
             type="file"
@@ -166,7 +200,60 @@ export default function UploadExcel() {
       {state === 'parsing' && (
         <div className="card p-8 text-center">
           <Loader2 className="w-8 h-8 text-brand-400 animate-spin mx-auto mb-3" />
-          <p className="text-slate-300">Parsing {fileName}...</p>
+          <p className="text-slate-300">Reading {fileName}...</p>
+        </div>
+      )}
+
+      {/* Column mapping */}
+      {state === 'mapping' && mapping && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <Settings2 className="w-4 h-4 text-brand-400" />
+            <p className="text-slate-300 font-medium">Match your columns</p>
+          </div>
+          <p className="text-slate-500 text-sm -mt-2">
+            We found {headers.length} column{headers.length === 1 ? '' : 's'} in <span className="text-slate-400">{fileName}</span>.
+            We've guessed the best match for each field below — check and adjust anything that's wrong.
+          </p>
+
+          <div className="card divide-y divide-slate-800">
+            {FIELD_ORDER.map(field => (
+              <div key={field} className="flex items-center justify-between gap-4 p-3.5">
+                <div>
+                  <p className="text-slate-200 text-sm font-medium">{FIELD_LABELS[field]}</p>
+                  {REQUIRED_FIELDS.includes(field) ? (
+                    <p className="text-red-400/80 text-xs">Required</p>
+                  ) : (
+                    <p className="text-slate-600 text-xs">Optional — defaults to 0 / today if not mapped</p>
+                  )}
+                </div>
+                <select
+                  value={mapping[field]}
+                  onChange={e => updateMapping(field, Number(e.target.value))}
+                  className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 min-w-[200px]"
+                >
+                  <option value={-1}>-- Not in file --</option>
+                  {headers.map((h, idx) => (
+                    <option key={idx} value={idx}>{h || `Column ${idx + 1}`}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          {!mappingIsComplete && (
+            <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 text-amber-400">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <p className="text-xs">Please map Product Name, Brand, and Category before continuing — these are required.</p>
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <button onClick={reset} className="btn-secondary">Cancel</button>
+            <button onClick={confirmMapping} disabled={!mappingIsComplete} className="btn-primary">
+              Continue to Preview
+            </button>
+          </div>
         </div>
       )}
 
@@ -185,6 +272,9 @@ export default function UploadExcel() {
               </div>
             )}
             <span className="text-slate-500 text-sm">{fileName}</span>
+            <button onClick={() => setState('mapping')} className="text-brand-400 text-xs underline ml-auto">
+              Edit column mapping
+            </button>
           </div>
 
           {invalidMessages.length > 0 && (
