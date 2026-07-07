@@ -6,6 +6,7 @@ import {
   buildRows,
   validateExcelRows,
   ColumnMapping,
+  FixedValues,
   FIELD_LABELS,
   REQUIRED_FIELDS,
 } from '../../utils/excelParser'
@@ -26,6 +27,7 @@ export default function UploadExcel() {
   const [headers, setHeaders] = useState<string[]>([])
   const [rawRows, setRawRows] = useState<any[][]>([])
   const [mapping, setMapping] = useState<ColumnMapping | null>(null)
+  const [fixedValues, setFixedValues] = useState<FixedValues>({})
   const [validRows, setValidRows] = useState<ExcelRow[]>([])
   const [invalidMessages, setInvalidMessages] = useState<string[]>([])
   const [result, setResult] = useState<{ processed: number; failed: number; errors: string[] } | null>(null)
@@ -69,7 +71,7 @@ export default function UploadExcel() {
 
   function confirmMapping() {
     if (!mapping) return
-    const rows = buildRows(rawRows, mapping)
+    const rows = buildRows(rawRows, mapping, fixedValues)
     const { valid, invalid } = validateExcelRows(rows)
     setValidRows(valid)
     setInvalidMessages(invalid)
@@ -112,6 +114,7 @@ export default function UploadExcel() {
     setHeaders([])
     setRawRows([])
     setMapping(null)
+    setFixedValues({})
     setValidRows([])
     setInvalidMessages([])
     setResult(null)
@@ -217,28 +220,47 @@ export default function UploadExcel() {
           </p>
 
           <div className="card divide-y divide-slate-800">
-            {FIELD_ORDER.map(field => (
-              <div key={field} className="flex items-center justify-between gap-4 p-3.5">
-                <div>
-                  <p className="text-slate-200 text-sm font-medium">{FIELD_LABELS[field]}</p>
-                  {REQUIRED_FIELDS.includes(field) ? (
-                    <p className="text-red-400/80 text-xs">Required</p>
-                  ) : (
-                    <p className="text-slate-600 text-xs">Optional — defaults to 0 / today if not mapped</p>
+            {FIELD_ORDER.map(field => {
+              const isFallbackField = field === 'brand' || field === 'category'
+              const columnNotMapped = mapping[field] === -1
+              return (
+                <div key={field} className="p-3.5 space-y-2">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-slate-200 text-sm font-medium">{FIELD_LABELS[field]}</p>
+                      {REQUIRED_FIELDS.includes(field) ? (
+                        <p className="text-red-400/80 text-xs">Required</p>
+                      ) : field === 'date' ? (
+                        <p className="text-slate-600 text-xs">Optional — defaults to today if not mapped</p>
+                      ) : isFallbackField ? (
+                        <p className="text-slate-600 text-xs">Optional — not every file has this as its own column</p>
+                      ) : (
+                        <p className="text-slate-600 text-xs">Optional — defaults to 0 if not mapped</p>
+                      )}
+                    </div>
+                    <select
+                      value={mapping[field]}
+                      onChange={e => updateMapping(field, Number(e.target.value))}
+                      className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 min-w-[200px]"
+                    >
+                      <option value={-1}>-- Not in file --</option>
+                      {headers.map((h, idx) => (
+                        <option key={idx} value={idx}>{h || `Column ${idx + 1}`}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {isFallbackField && columnNotMapped && (
+                    <input
+                      type="text"
+                      value={fixedValues[field] || ''}
+                      onChange={e => setFixedValues({ ...fixedValues, [field]: e.target.value })}
+                      placeholder={`No ${FIELD_LABELS[field]} column? Type one value to use for every row, e.g. "${field === 'brand' ? 'Unbranded' : 'General'}"`}
+                      className="w-full bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 placeholder:text-slate-600"
+                    />
                   )}
                 </div>
-                <select
-                  value={mapping[field]}
-                  onChange={e => updateMapping(field, Number(e.target.value))}
-                  className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 min-w-[200px]"
-                >
-                  <option value={-1}>-- Not in file --</option>
-                  {headers.map((h, idx) => (
-                    <option key={idx} value={idx}>{h || `Column ${idx + 1}`}</option>
-                  ))}
-                </select>
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           {!mappingIsComplete && (
