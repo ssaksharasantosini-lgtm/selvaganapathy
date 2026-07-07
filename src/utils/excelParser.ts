@@ -16,7 +16,7 @@ export interface ColumnMapping {
   quantity_sold: number
 }
 
-export const REQUIRED_FIELDS: (keyof ColumnMapping)[] = ['product_name', 'brand', 'category']
+export const REQUIRED_FIELDS: (keyof ColumnMapping)[] = ['product_name']
 
 export const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
   date: 'Date',
@@ -27,9 +27,54 @@ export const FIELD_LABELS: Record<keyof ColumnMapping, string> = {
   quantity_sold: 'Quantity Sold',
 }
 
+// Keywords that indicate a cell is likely a column header, used to find the
+// real header row in files that have title/address/report-date blocks above it
+// (common in "stock summary" style exports).
+const HEADER_KEYWORDS = [
+  'date', 'product', 'item', 'name', 'description', 'brand', 'make', 'manufacturer',
+  'category', 'type', 'group', 'stock', 'qty', 'quantity', 'sold', 'sale',
+  'code', 'sku', 's.no', 'sno', 'rate', 'price', 'value', 'purchase', 'received',
+]
+
+/**
+ * Scans the first N rows of a sheet to find the row that looks most like a
+ * real header row (many short text cells matching common header keywords),
+ * skipping title/company-name/report-date blocks that often sit above it.
+ */
+function findHeaderRowIndex(jsonData: any[][]): number {
+  const scanLimit = Math.min(jsonData.length, 20)
+  let bestIndex = 0
+  let bestScore = -1
+
+  for (let i = 0; i < scanLimit; i++) {
+    const row = jsonData[i] || []
+    const nonEmptyCells = row.filter((c: any) => c !== '' && c !== null && c !== undefined)
+    if (nonEmptyCells.length < 2) continue // title rows are often a single merged cell
+
+    const lowerCells = nonEmptyCells.map((c: any) => String(c).toLowerCase().trim())
+    const keywordMatches = lowerCells.filter(c => HEADER_KEYWORDS.some(k => c.includes(k))).length
+
+    // A real header row should have several distinct short labels, most of
+    // which match known keywords, and the row below it should contain data
+    // (not be blank or another title line).
+    const nextRow = jsonData[i + 1] || []
+    const nextRowHasData = nextRow.filter((c: any) => c !== '' && c !== null && c !== undefined).length >= 2
+
+    const score = keywordMatches * 2 + (nextRowHasData ? 1 : 0)
+
+    if (keywordMatches >= 2 && score > bestScore) {
+      bestScore = score
+      bestIndex = i
+    }
+  }
+
+  return bestScore >= 0 ? bestIndex : 0
+}
+
 /**
  * Reads a raw .xlsx / .xls / .csv file and returns its header row plus
- * the remaining data rows, with NO assumption about column names or order.
+ * the remaining data rows, with NO assumption about column names, order,
+ * or that the header sits on the very first line of the sheet.
  */
 export function readFile(file: File): Promise<ParsedFile> {
   return new Promise((resolve, reject) => {
@@ -44,8 +89,11 @@ export function readFile(file: File): Promise<ParsedFile> {
 
         if (jsonData.length < 2) throw new Error('File is empty or has no data rows')
 
-        const headers = jsonData[0].map((h: any) => String(h ?? '').trim())
-        const rawRows = jsonData.slice(1).filter(row => row && row.some(cell => cell !== '' && cell !== null && cell !== undefined))
+        const headerRowIndex = findHeaderRowIndex(jsonData)
+        const headers = jsonData[headerRowIndex].map((h: any) => String(h ?? '').trim())
+        const rawRows = jsonData
+          .slice(headerRowIndex + 1)
+          .filter(row => row && row.some(cell => cell !== '' && cell !== null && cell !== undefined))
 
         resolve({ headers, rawRows })
       } catch (err: any) {
@@ -92,7 +140,12 @@ export function autoDetectMapping(headers: string[]): ColumnMapping {
  * mapping values are column indices into the raw row array, or -1 if
  * that field isn't present in the uploaded file.
  */
-export function buildRows(rawRows: any[][], mapping: ColumnMapping): ExcelRow[] {
+export interface FixedValues {
+  brand?: string
+  category?: string
+}
+
+export function buildRows(rawRows: any[][], mapping: ColumnMapping, fixedValues: FixedValues = {}): ExcelRow[] {
   const rows: ExcelRow[] = []
   const get = (row: any[], idx: number) => (idx >= 0 ? row[idx] : undefined)
 
@@ -128,11 +181,14 @@ export function buildRows(rawRows: any[][], mapping: ColumnMapping): ExcelRow[] 
       }
     }
 
+    const brandFromColumn = String(get(row, mapping.brand) ?? '').trim()
+    const categoryFromColumn = String(get(row, mapping.category) ?? '').trim()
+
     const excelRow: ExcelRow = {
       date: dateStr,
       product_name: String(get(row, mapping.product_name) ?? '').trim(),
-      brand: String(get(row, mapping.brand) ?? '').trim(),
-      category: String(get(row, mapping.category) ?? '').trim(),
+      brand: brandFromColumn || fixedValues.brand?.trim() || '',
+      category: categoryFromColumn || fixedValues.category?.trim() || '',
       stock_added: Number(get(row, mapping.stock_added) ?? 0) || 0,
       quantity_sold: Number(get(row, mapping.quantity_sold) ?? 0) || 0,
     }
@@ -150,11 +206,14 @@ export function validateExcelRows(rows: ExcelRow[]): { valid: ExcelRow[]; invali
   rows.forEach((row, idx) => {
     const lineNum = idx + 2
     if (!row.product_name) { invalid.push(`Row ${lineNum}: Missing product name`); return }
-    if (!row.brand) { invalid.push(`Row ${lineNum}: Missing brand for ${row.product_name}`); return }
-    if (!row.category) { invalid.push(`Row ${lineNum}: Missing category for ${row.product_name}`); return }
     if (row.stock_added < 0) { invalid.push(`Row ${lineNum}: Negative stock added`); return }
     if (row.quantity_sold < 0) { invalid.push(`Row ${lineNum}: Negative quantity sold`); return }
-    valid.push(row)
+
+    valid.push({
+      ...row,
+      brand: row.brand || 'Unbranded',
+      category: row.category || 'Uncategorized',
+    })
   })
 
   return { valid, invalid }
