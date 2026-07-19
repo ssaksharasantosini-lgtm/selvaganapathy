@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { User, Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import { UserProfile } from '../types'
@@ -20,20 +20,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [loading, setLoading] = useState(true)
+  // Track whether initial session check is done to avoid race with onAuthStateChange
+  const initialised = useRef(false)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    // Step 1: Get the current session on mount
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       setSession(session)
       setUser(session?.user ?? null)
-      if (session?.user) fetchProfile(session.user.id)
-      else setLoading(false)
+      if (session?.user) {
+        await fetchProfile(session.user.id)
+      } else {
+        setLoading(false)
+      }
+      // Mark init complete AFTER profile is fetched so the listener below skips this first event
+      initialised.current = true
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    // Step 2: Listen for future auth changes (login, logout, token refresh)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      // Skip the first INITIAL_SESSION event — already handled above
+      if (!initialised.current) return
+
       setSession(session)
       setUser(session?.user ?? null)
-      if (session?.user) fetchProfile(session.user.id)
-      else {
+
+      if (session?.user) {
+        await fetchProfile(session.user.id)
+      } else {
         setProfile(null)
         setLoading(false)
       }
@@ -50,21 +64,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .eq('id', userId)
         .single()
 
-      if (!error && data) setProfile(data)
+      if (!error && data) {
+        setProfile(data)
+      } else {
+        console.error('Profile fetch error:', error)
+        setProfile(null)
+      }
     } catch (err) {
       console.error('Error fetching profile:', err)
+      setProfile(null)
     } finally {
       setLoading(false)
     }
   }
 
   async function signIn(email: string, password: string) {
+    setLoading(true)
     const { error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) setLoading(false)
     return { error: error as Error | null }
   }
 
   async function signOut() {
+    setLoading(true)
+    setProfile(null)
     await supabase.auth.signOut()
+    setLoading(false)
   }
 
   const isAdmin = profile?.role === 'admin'
